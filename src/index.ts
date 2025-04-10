@@ -7,6 +7,14 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 
 const STATSIG_API_URL = "https://api.statsig.com/console/v1/gates";
 const STATSIG_EXPERIMENT_API_URL = "https://api.statsig.com/console/v1/experiments";
+const STATSIG_OPENAPI_URL = "https://api.statsig.com/openapi/20240601.json";
+const STATSIG_API_URL_BASE = "https://api.statsig.com";
+
+const API_HEADERS = {
+  "Content-Type": "application/json",
+  "STATSIG-API-KEY": process.env.STATSIG_API_KEY || "[KEY MISSING]",
+  "STATSIG-API-VERSION": "20240601"
+};
 
 // Function to create a gate using the Statsig Console API
 async function createGate(gate: { name: string; isEnabled: boolean; description: string }) {
@@ -16,28 +24,22 @@ async function createGate(gate: { name: string; isEnabled: boolean; description:
     description: gate.description,
   };
 
-  const headers = {
-    "Content-Type": "application/json",
-    "STATSIG-API-KEY": process.env.STATSIG_API_KEY || "[KEY MISSING]",
-    "STATSIG-API-VERSION": "20240601"
-  };
-
   console.error('Sending request to Statsig:', {
     url: STATSIG_API_URL,
     method: 'POST',
     payload: payload,
-    headers: headers
+    headers: API_HEADERS,
   });
 
   try {
     const response = await fetch(STATSIG_API_URL, {
       method: "POST",
-      headers: headers,
+      headers: API_HEADERS,
       body: JSON.stringify(payload)
     });
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`Failed to create gate: ${response.status} ${text}. Payload: ${JSON.stringify(payload)} Headers: ${JSON.stringify(headers)}`);
+      throw new Error(`Failed to create gate: ${response.status} ${text}. Payload: ${JSON.stringify(payload)} Headers: ${JSON.stringify(API_HEADERS)}`);
     }
     return await response.json();
   } catch (error) {
@@ -64,23 +66,17 @@ async function createExperiment(experiment: {
     allocation: 100,
   };
 
-  const headers = {
-    "Content-Type": "application/json",
-    "STATSIG-API-KEY": process.env.STATSIG_API_KEY || "[KEY MISSING]",
-    "STATSIG-API-VERSION": "20240601"
-  };
-
   console.error('Sending request to Statsig:', {
     url: STATSIG_EXPERIMENT_API_URL,
     method: 'POST',
     payload: payload,
-    headers: headers
+    headers: API_HEADERS
   });
 
   try {
     const response = await fetch(STATSIG_EXPERIMENT_API_URL, {
       method: "POST",
-      headers: headers,
+      headers: API_HEADERS,
       body: JSON.stringify(payload)
     });
     if (!response.ok) {
@@ -162,7 +158,7 @@ async function buildTools(server: McpServer, specUrl: string) {
   for (const path in schema) {
     for (const method in schema[path]) {
       // Only do get for now
-      const { summary, parameters } = schema[path][method];
+      const { summary, parameters, pathParameters } = schema[path][method];
       const desc = summary ? `${summary} (Call ${method.toUpperCase()} ${path})` : `Get statsig-${method}-${path}`;
 
       let toolName = desc.replace(/[^a-zA-Z0-9]/g, '-').substring(0, 64);
@@ -177,14 +173,30 @@ async function buildTools(server: McpServer, specUrl: string) {
         desc,
         parameters,
         async (params) => {
-          return { content: [{ type: "text", text: "TODO" }] };
+          let interpolatedPath = path;
+          const searchParams = new URLSearchParams();
+          for (const paramName in params) {
+            if (pathParameters.includes(paramName)) {
+              interpolatedPath = interpolatedPath.replace(`{${paramName}}`, params[paramName]);
+            } else {
+              searchParams.set(paramName, params[paramName]);
+            }
+          }
+          const response = await fetch(`${STATSIG_API_URL_BASE}${interpolatedPath}?${searchParams.toString()}`, {
+            method: method,
+            headers: API_HEADERS,
+          });
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(`Failed calling the API: ${response.status} ${text}`);
+          }
+          return { content: [{ type: "text", text: await response.text() }] };
         }
       );
     }
   }
 }
 
-const STATSIG_OPENAPI_URL = "https://api.statsig.com/openapi/20240601.json";
 async function main() {
   await buildTools(server, STATSIG_OPENAPI_URL);
   const transport = new StdioServerTransport();

@@ -10,7 +10,15 @@ export async function fetchOpenApiSpec(specUrl: string): Promise<OpenAPIObject> 
   return json as OpenAPIObject;
 }
 
-type ApiSchema = Record<string, Record<string, {summary?: string, description?: string, parameters: Record<string, z.ZodType>}>>;
+type ApiSchema = Record<
+  string,
+  Record<string, {
+    summary?: string,
+    description?: string,
+    parameters: Record<string, z.ZodType>,
+    pathParameters: string[],
+  }>
+>;
 
 const methods = ["get", "post", "put", "delete", "options", "head", "patch", "trace"] as const;
 
@@ -66,7 +74,11 @@ function convertParameterToZod(parameter: ParameterObject): z.ZodType | undefine
   if (!parameter.schema) {
     return undefined;
   }
-  return convertSchemaObjectToZod(parameter.schema);
+  const schema = convertSchemaObjectToZod(parameter.schema);
+  if (!parameter.required) {
+    return schema.optional();
+  }
+  return schema;
 }
 
 function convertParametersToZod(parameters: (ParameterObject | ReferenceObject)[] | undefined): Record<string, z.ZodType> {
@@ -94,6 +106,7 @@ export function generateZodSchema(spec: OpenAPIObject): ApiSchema {
       schema[path][method] = {
         summary: operation.summary,
         description: operation.description,
+        pathParameters: (operation.parameters ?? []).filter(p => 'in' in p && p.in === 'path').map(p => 'in' in p ? p.name : null).filter((p): p is string => p != null),
         parameters: convertParametersToZod(operation.parameters),
       };
     }
