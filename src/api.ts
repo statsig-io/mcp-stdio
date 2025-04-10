@@ -41,6 +41,9 @@ function convertSchemaObjectToZod(schemaObject: SchemaObject | ReferenceObject):
         case 'number':
           return z.number();
         case 'string':
+          if (schemaObject.enum && schemaObject.enum.every(e => typeof e === 'string')) {
+            return z.enum(schemaObject.enum as [string, ...string[]]);
+          }
           return z.string();
         case 'boolean':
           return z.boolean();
@@ -74,9 +77,12 @@ function convertParameterToZod(parameter: ParameterObject): z.ZodType | undefine
   if (!parameter.schema) {
     return undefined;
   }
-  const schema = convertSchemaObjectToZod(parameter.schema);
+  let schema = convertSchemaObjectToZod(parameter.schema);
   if (!parameter.required) {
-    return schema.optional();
+    schema = schema.optional();
+  }
+  if (parameter.description) {
+    schema = schema.describe(parameter.description);
   }
   return schema;
 }
