@@ -5,6 +5,7 @@ import {
   SchemaObject,
 } from "openapi3-ts/oas30";
 import { ZodTypeAny, z } from "zod";
+
 import { fetchOpenApiSpec } from "./api.js";
 
 export type ApiSchema = Record<
@@ -16,6 +17,7 @@ export type ApiSchema = Record<
       parameters: Record<string, z.ZodType>;
       pathParameters?: string[];
       description?: string;
+      isWHN: boolean;
     }
   >
 >;
@@ -30,8 +32,9 @@ export class OpenApiToZod {
     "options",
     "head",
     "trace",
-  ];
+  ] as const;
   private INCLUDE_TAG = "MCP";
+  private WHN_TAG_SUBSTR = "(Warehouse Native)";
   private openApiSpec: OpenAPIObject | null = null;
   constructor(private specUrl: string) {
     this.specUrl = specUrl;
@@ -151,11 +154,9 @@ export class OpenApiToZod {
     }
 
     for (const [path, pathItem] of Object.entries(this.openApiSpec.paths)) {
-      for (const [method, operation] of Object.entries(pathItem)) {
-        if (!this.HTTP_METHODS.includes(method)) {
-          continue;
-        }
-        if (!operation.tags || !operation.tags.includes(this.INCLUDE_TAG)) {
+      for (const method of this.HTTP_METHODS) {
+        const operation = pathItem[method];
+        if (!operation || !operation.tags || !operation.tags.includes(this.INCLUDE_TAG)) {
           continue;
         }
         if (!(path in schema)) {
@@ -171,6 +172,7 @@ export class OpenApiToZod {
           parameters,
           pathParameters,
           description: operation.description,
+          isWHN: operation.tags.some((tag) => tag.includes(this.WHN_TAG_SUBSTR)),
         };
       }
     }

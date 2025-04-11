@@ -24,7 +24,21 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
-async function buildTools(server: McpServer, specUrl: string) {
+async function isWarehouseNative(): Promise<boolean | null> {
+  const response = await fetch(`${getUrlBase()}/console/v1/company`, {
+    headers: API_HEADERS,
+  });
+  if (!response.ok) {
+    return null;
+  }
+  const json = await response.json();
+  if (typeof json.data?.isWarehouseNative !== "boolean") {
+    return null;
+  }
+  return json.data.isWarehouseNative;
+}
+
+async function buildTools(server: McpServer, specUrl: string, showWarehouseNative: boolean) {
   const converter = await new OpenApiToZod(specUrl).initialize();
   const schema = converter.specToZod();
   const toolNames = new Set<string>();
@@ -36,7 +50,15 @@ async function buildTools(server: McpServer, specUrl: string) {
     }
     toolNames.add(toolName);
 
-    const methodsInfo = Object.values(methods)
+    const methodsToUse = Object.fromEntries(Object.entries(methods).filter(([_, method]) => 
+      method.isWHN === showWarehouseNative
+    ));
+
+    if (Object.keys(methodsToUse).length === 0) {
+      continue;
+    }
+
+    const methodsInfo = Object.values(methodsToUse)
       .map((methodInfo) => {
         return `${methodInfo.summary?.toUpperCase()}: ${
           methodInfo.summary
@@ -46,11 +68,11 @@ async function buildTools(server: McpServer, specUrl: string) {
 
     const description =
       `API endpoint: ${endpoint}\n` +
-      `Available methods: ${Object.keys(methods).join(", ").toUpperCase()}\n` +
+      `Available methods: ${Object.keys(methodsToUse).join(", ").toUpperCase()}\n` +
       `---\n` +
       methodsInfo;
 
-    const methodNames = Object.keys(methods);
+    const methodNames = Object.keys(methodsToUse);
     let enhancedParameters: Record<string, z.ZodType> = {
       method: z
         .enum(methodNames as [string, ...string[]])
@@ -59,7 +81,7 @@ async function buildTools(server: McpServer, specUrl: string) {
         ),
     };
 
-    for (const [method, methodData] of Object.entries(methods)) {
+    for (const [method, methodData] of Object.entries(methodsToUse)) {
       if (methodData.parameters) {
         enhancedParameters[`${method}_params`] = z
           .object(methodData.parameters)
@@ -71,7 +93,7 @@ async function buildTools(server: McpServer, specUrl: string) {
       const { method, ...otherParams } = params;
       const methodToUse = method || methodNames[0];
       const methodParams = otherParams[`${methodToUse}_params`] || {};
-      const methodConfig = methods[methodToUse];
+      const methodConfig = methodsToUse[methodToUse];
       const pathParameters = methodConfig.pathParameters;
       let interpolatedPath = endpoint;
       const searchParams = new URLSearchParams();
@@ -126,7 +148,9 @@ async function buildTools(server: McpServer, specUrl: string) {
 async function main() {
   const specUrl = getOpenApiUrl();
   console.error(`Using API spec from ${specUrl}`);
-  await buildTools(server, specUrl);
+  const isWHN = await isWarehouseNative();
+  // If we can't determine if WHN, we want to show WHN
+  await buildTools(server, specUrl, isWHN === false ? false : true);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Statsig MCP Server running on stdio");
