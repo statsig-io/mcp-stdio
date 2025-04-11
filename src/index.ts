@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { OpenApiToZod } from "./testing.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import os from 'os';
 import { z } from "zod";
 
 const DEFAULT_STATSIG_API_URL_BASE = "https://api.statsig.com";
@@ -17,6 +18,7 @@ const API_HEADERS = {
   "Content-Type": "application/json",
   "STATSIG-API-KEY": process.env.STATSIG_API_KEY || "[KEY MISSING]",
   "STATSIG-API-VERSION": "20240601",
+  "User-Agent": `statsig-mcp-server/1.0.0 (platform=${os.platform()}; node=${process.version.substring(1)})`,
 };
 
 const server = new McpServer({
