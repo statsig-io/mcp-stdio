@@ -6,23 +6,37 @@ import type {
   RequestBodyObject,
   ComponentsObject,
   PathItemObject,
+  OperationObject,
 } from "openapi3-ts/oas30";
 import { z, ZodTypeAny } from "zod";
 
 type ZodSchema = ZodTypeAny;
 
+export async function fetchOpenApiSpec(
+  specUrl: string
+): Promise<OpenAPIObject> {
+  const response = await fetch(specUrl);
+  if (!response.ok) {
+    throw new Error(`Error fetching openapi spec. Status: ${response.status}`);
+  }
+  const json = await response.json();
+  return json as OpenAPIObject;
+}
+
 type ApiSchema = Record<
   string,
-  Record<
-    string,
-    {
-      summary?: string;
-      description?: string;
-      pathParameters: string[];
-      parameters: Record<string, ZodSchema>;
-      requestBody?: Record<string, ZodSchema>;
-    }
-  >
+  {
+    methods: string[];
+    summary?: string;
+    description?: string;
+    parameters: Record<string, z.ZodType>;
+    requestBody?: Record<string, ZodSchema>;
+    pathParameters: string[];
+    methodDescriptions: Record<
+      string,
+      { summary?: string; description?: string }
+    >;
+  }
 >;
 
 const methods = [
@@ -50,10 +64,10 @@ function resolveReference<T>(ref: string, components: ComponentsObject): T {
 
 function convertSchemaObjectToZod(
   schemaObject: any,
-  components: ComponentsObject
+  components?: ComponentsObject | undefined
 ): ZodSchema {
   if ("$ref" in schemaObject) {
-    const resolved = resolveReference(schemaObject.$ref, components);
+    const resolved = resolveReference(schemaObject.$ref, components ?? {});
     return convertSchemaObjectToZod(resolved, components);
   }
 
@@ -137,22 +151,23 @@ function ensureParameterObject(
 }
 
 function convertParameterToZod(
-  parameter: ParameterObject,
-  components: ComponentsObject
+  parameter: ParameterObject
 ): z.ZodType | undefined {
   if (!parameter.schema) {
     return undefined;
   }
-  const schema = convertSchemaObjectToZod(parameter.schema, components);
+  let schema = convertSchemaObjectToZod(parameter.schema);
   if (!parameter.required) {
-    return schema.optional();
+    schema = schema.optional();
+  }
+  if (parameter.description) {
+    schema = schema.describe(parameter.description);
   }
   return schema;
 }
 
 function convertParametersToZod(
-  parameters: (ParameterObject | ReferenceObject)[] | undefined,
-  components: ComponentsObject
+  parameters: (ParameterObject | ReferenceObject)[] | undefined
 ): Record<string, z.ZodType> {
   if (!parameters) {
     return {};
@@ -161,7 +176,7 @@ function convertParametersToZod(
     parameters
       .filter(ensureParameterObject)
       .map((param) => {
-        const zodSchema = convertParameterToZod(param, components);
+        const zodSchema = convertParameterToZod(param);
         return zodSchema ? [param.name, zodSchema] : null;
       })
       .filter((entry): entry is [string, z.ZodTypeAny] => entry !== null)
@@ -198,53 +213,90 @@ function convertRequestBodyToZod(
   return result;
 }
 
+function mergeParameters(operations: Record<string, OperationObject>): {
+  parameters: Record<string, z.ZodType>;
+  pathParameters: string[];
+  methodDescriptions: Record<
+    string,
+    { summary?: string; description?: string }
+  >;
+} {
+  const allParameters: Record<string, z.ZodType> = {};
+  const pathParameters: Set<string> = new Set();
+  const methodDescriptions: Record<
+    string,
+    { summary?: string; description?: string }
+  > = {};
+
+  for (const [method, operation] of Object.entries(operations)) {
+    methodDescriptions[method] = {
+      summary: operation.summary,
+      description: operation.description,
+    };
+
+    const methodParams = convertParametersToZod(operation.parameters);
+    for (const [paramName, paramSchema] of Object.entries(methodParams)) {
+      if (allParameters[paramName]) {
+        allParameters[paramName] = z.union([
+          allParameters[paramName],
+          paramSchema,
+        ]);
+      } else {
+        allParameters[paramName] = paramSchema;
+      }
+    }
+
+    const methodPathParams = (operation.parameters ?? [])
+      .filter((p) => "in" in p && p.in === "path")
+      .map((p) => ("in" in p ? p.name : null))
+      .filter((p): p is string => p != null);
+
+    methodPathParams.forEach((param) => pathParameters.add(param));
+  }
+
+  return {
+    parameters: allParameters,
+    pathParameters: Array.from(pathParameters),
+    methodDescriptions,
+  };
+}
+
 export function generateZodSchema(spec: OpenAPIObject): ApiSchema {
-  const result: ApiSchema = {};
+  const schema: ApiSchema = {};
   const components = spec.components ?? {};
 
   for (const [path, pathItem] of Object.entries(spec.paths)) {
-    result[path] = {};
+    const availableMethods: string[] = [];
+    const operationsByMethod: Record<string, OperationObject> = {};
 
     for (const method of methods) {
-      const operation = (pathItem as PathItemObject)[method];
-      if (!operation) continue;
-
-      const mergedParams = [
-        ...(pathItem.parameters ?? []),
-        ...(operation.parameters ?? []),
-      ];
-
-      result[path][method] = {
-        summary: operation.summary,
-        description: operation.description,
-        pathParameters: mergedParams
-          .filter((p): p is ParameterObject =>
-            "$ref" in p
-              ? resolveReference<ParameterObject>(p.$ref, components)?.in ===
-                "path"
-              : p.in === "path"
-          )
-          .map((p) =>
-            "$ref" in p
-              ? resolveReference<ParameterObject>(p.$ref as string, components)
-                  .name
-              : p.name
-          ),
-        parameters: convertParametersToZod(mergedParams, components),
-        requestBody: convertRequestBodyToZod(operation.requestBody, components),
-      };
+      const operation = pathItem[method];
+      if (operation) {
+        availableMethods.push(method);
+        operationsByMethod[method] = operation;
+      }
     }
+
+    if (availableMethods.length === 0) {
+      continue;
+    }
+
+    const { parameters, pathParameters, methodDescriptions } =
+      mergeParameters(operationsByMethod);
+
+    schema[path] = {
+      methods: availableMethods,
+      summary: operationsByMethod[availableMethods[0]]?.summary,
+      description: operationsByMethod[availableMethods[0]]?.description,
+      parameters,
+      requestBody: convertRequestBodyToZod(
+        operationsByMethod[availableMethods[0]].requestBody,
+        components
+      ),
+      pathParameters,
+      methodDescriptions,
+    };
   }
 
-  return result;
-}
-
-export async function fetchOpenApiSpec(
-  specUrl: string
-): Promise<OpenAPIObject> {
-  const response = await fetch(specUrl);
-  if (!response.ok) {
-    throw new Error(`Error fetching OpenAPI spec. Status: ${response.status}`);
-  }
-  return response.json() as Promise<OpenAPIObject>;
+  return schema;
 }

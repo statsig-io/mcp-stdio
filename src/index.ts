@@ -1,20 +1,26 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { OpenApiToZod } from "./testing.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { fetchOpenApiSpec } from "./api.js";
-import { generateZodSchema } from "./api.js";
+import os from "os";
 import { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
 
-const STATSIG_API_URL = "https://api.statsig.com/console/v1/gates";
-const STATSIG_EXPERIMENT_API_URL =
-  "https://api.statsig.com/console/v1/experiments";
-const STATSIG_OPENAPI_URL = "https://api.statsig.com/openapi/20240601.json";
-const STATSIG_API_URL_BASE = "https://api.statsig.com";
+const DEFAULT_STATSIG_API_URL_BASE = "https://latest.statsigapi.net";
+
+function getUrlBase() {
+  return process.env.STATSIG_HOST || DEFAULT_STATSIG_API_URL_BASE;
+}
+
+function getOpenApiUrl() {
+  return `${getUrlBase()}/openapi/20240601.json`;
+}
 
 const API_HEADERS = {
   "Content-Type": "application/json",
   "STATSIG-API-KEY": process.env.STATSIG_API_KEY || "[KEY MISSING]",
   "STATSIG-API-VERSION": "20240601",
+  "User-Agent": `statsig-mcp-server/1.0.0 (platform=${os.platform()}; node=${process.version.substring(
+    1
+  )})`,
 };
 
 const server = new McpServer({
@@ -22,100 +28,146 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
-async function buildTools(server: McpServer, specUrl: string) {
-  const spec = await fetchOpenApiSpec(
-    "https://api.statsig.com/openapi/20240601.json"
-  );
-  const schema = generateZodSchema(spec);
+async function isWarehouseNative(): Promise<boolean | null> {
+  const response = await fetch(`${getUrlBase()}/console/v1/company`, {
+    headers: API_HEADERS,
+  });
+  if (!response.ok) {
+    return null;
+  }
+  const json = await response.json();
+  if (typeof json.data?.isWarehouseNative !== "boolean") {
+    return null;
+  }
+  return json.data.isWarehouseNative;
+}
+
+async function buildTools(
+  server: McpServer,
+  specUrl: string,
+  showWarehouseNative: boolean
+) {
+  const converter = await new OpenApiToZod(specUrl).initialize();
+  const schema = converter.specToZod();
   const toolNames = new Set<string>();
-  for (const path in schema) {
-    for (const method in schema[path]) {
-      const { summary, parameters, pathParameters, requestBody } =
-        schema[path][method];
-      const desc = summary
-        ? `${summary} (Call ${method.toUpperCase()} ${path})`
-        : `Get statsig-${method}-${path}`;
 
-      let toolName = desc.replace(/[^a-zA-Z0-9]/g, "-").substring(0, 64);
-      if (toolNames.has(toolName)) {
-        // has to be unique
-        toolName = `${toolName}-${toolNames.size}`;
+  for (const [endpoint, methods] of Object.entries(schema)) {
+    let toolName = endpoint.replace(/[^a-zA-Z0-9]/g, "-").substring(0, 40);
+    if (toolNames.has(toolName)) {
+      toolName = `${toolName}-${toolNames.size}`;
+    }
+    toolNames.add(toolName);
+
+    const methodsToUse = Object.fromEntries(
+      Object.entries(methods).filter(
+        ([_, method]) => method.isWHN === showWarehouseNative
+      )
+    );
+
+    if (Object.keys(methodsToUse).length === 0) {
+      continue;
+    }
+
+    const methodsInfo = Object.values(methodsToUse)
+      .map((methodInfo) => {
+        return `${methodInfo.summary?.toUpperCase()}: ${
+          methodInfo.summary
+        } || "No summary available"`;
+      })
+      .join("\n");
+
+    const description =
+      `API endpoint: ${endpoint}\n` +
+      `Available methods: ${Object.keys(methodsToUse)
+        .join(", ")
+        .toUpperCase()}\n` +
+      `---\n` +
+      methodsInfo;
+
+    const methodNames = Object.keys(methodsToUse);
+    let enhancedParameters: Record<string, z.ZodType> = {
+      method: z
+        .enum(methodNames as [string, ...string[]])
+        .describe(
+          `HTTP method to use. Available methods: ${methodNames.join(", ")}`
+        ),
+    };
+
+    for (const [method, methodData] of Object.entries(methodsToUse)) {
+      if (methodData.parameters) {
+        enhancedParameters[`${method}_params`] = z
+          .object({
+            ...methodData.parameters,
+            ...methodData.requestBody,
+          })
+          .optional();
       }
-      toolNames.add(toolName);
+    }
 
-      const combinedParams: Record<string, z.ZodTypeAny> = {
-        ...parameters,
-        ...requestBody,
-      };
-
-      server.tool(toolName, desc, combinedParams, async (params) => {
-        let interpolatedPath = path;
-        const searchParams = new URLSearchParams();
-        for (const paramName in params) {
-          if (pathParameters.includes(paramName)) {
-            interpolatedPath = interpolatedPath.replace(
-              `{${paramName}}`,
-              params[paramName]
-            );
-          } else {
-            searchParams.set(paramName, params[paramName]);
+    server.tool(toolName, description, enhancedParameters, async (params) => {
+      const { method, ...otherParams } = params;
+      const methodToUse = method || methodNames[0];
+      const methodParams = otherParams[`${methodToUse}_params`] || {};
+      const methodConfig = methodsToUse[methodToUse];
+      const pathParameters = methodConfig.pathParameters;
+      let interpolatedPath = endpoint;
+      const searchParams = new URLSearchParams();
+      for (const [paramName, paramValue] of Object.entries(methodParams)) {
+        if (pathParameters?.includes(paramName)) {
+          interpolatedPath = interpolatedPath.replace(
+            `{${paramName}}`,
+            encodeURIComponent(String(paramValue))
+          );
+        } else {
+          if (paramValue != null) {
+            searchParams.set(paramName, String(paramValue));
           }
         }
+      }
+      const queryString = searchParams.toString();
+      const url = `${getUrlBase()}${interpolatedPath}${
+        queryString ? `?${queryString}` : ""
+      }`;
+      console.error(`Sending request to ${url}`);
+      const result = methodParams["application/json"];
 
-        switch (method.toUpperCase()) {
-          case "GET":
-            const getResponse = await fetch(
-              `${STATSIG_API_URL_BASE}${interpolatedPath}?${searchParams.toString()}`,
-              {
-                method: method,
-                headers: API_HEADERS,
-              }
-            );
-            if (!getResponse.ok) {
-              const text = await getResponse.text();
-              throw new Error(
-                `Failed calling the API: ${getResponse.status} ${text}`
-              );
-            }
-            return {
-              content: [{ type: "text", text: await getResponse.text() }],
-            };
-          case "POST":
-            const result = params["application/json"];
-            const queryString = searchParams.toString();
-            const url = `${STATSIG_API_URL_BASE}${interpolatedPath}${
-              queryString ? `?${queryString}` : ""
-            }`;
+      try {
+        const response = await fetch(url, {
+          method: methodToUse,
+          headers: API_HEADERS,
+          body: result ? JSON.stringify(result) : undefined,
+        });
 
-            const postResponse = await fetch(url, {
-              method: method,
-              headers: {
-                ...API_HEADERS,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify(result),
-            });
-
-            if (!postResponse.ok) {
-              const text = await postResponse.text();
-              throw new Error(
-                `Failed calling the API: ${postResponse.status} ${text}`
-              );
-            }
-
-            return {
-              content: [{ type: "text", text: await postResponse.text() }],
-            };
-          default:
-            throw new Error(`Unsupported HTTP method: ${method}`);
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`API Error (${response.status}): ${errorText}`);
         }
-      });
-    }
+        let responseData;
+        const contentType = response.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          responseData = await response.json();
+          return {
+            content: [
+              { type: "text", text: JSON.stringify(responseData, null, 2) },
+            ],
+          };
+        } else {
+          responseData = await response.text();
+          return { content: [{ type: "text", text: responseData }] };
+        }
+      } catch (error) {
+        throw new Error(`Error calling the API: ${(error as Error).message}`);
+      }
+    });
   }
 }
 
 async function main() {
-  await buildTools(server, STATSIG_OPENAPI_URL);
+  const specUrl = getOpenApiUrl();
+  console.error(`Using API spec from ${specUrl}`);
+  const isWHN = await isWarehouseNative();
+  // If we can't determine if WHN, we want to show WHN
+  await buildTools(server, specUrl, isWHN === false ? false : true);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Statsig MCP Server running on stdio");
@@ -125,19 +177,3 @@ main().catch((error) => {
   console.error("Fatal error in main():", error);
   process.exit(1);
 });
-
-// async function derp() {
-//   const schema = generateZodSchema(await fetchOpenApiSpec(STATSIG_OPENAPI_URL));
-//   for (const path in schema) {
-//     for (const method in schema[path]) {
-//       const { summary, description, parameters } = schema[path][method];
-//       console.log(
-//         summary,
-//         description,
-//         JSON.stringify(zodToJsonSchema(z.object(parameters)), null, 2)
-//       );
-//     }
-//   }
-// }
-
-// derp();
