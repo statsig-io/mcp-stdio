@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { OpenApiToZod } from "./testing.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
 const STATSIG_OPENAPI_URL = "https://api.statsig.com/openapi/20240601.json";
@@ -52,19 +52,17 @@ async function buildTools(server: McpServer, specUrl: string) {
         ),
     };
 
-    for (const methodData of Object.values(methods)) {
+    for (const [method, methodData] of Object.entries(methods)) {
       if (methodData.parameters) {
-        enhancedParameters = {
-          ...enhancedParameters,
-          ...methodData.parameters,
-        };
+        enhancedParameters[`${method}_params`] = z.object(methodData.parameters).optional();
       }
     }
+
     server.tool(toolName, description, enhancedParameters, async (params) => {
       const { method, ...requestParams } = params;
-      const methodToUse = method || methodNames[0];
+      const parameters = requestParams[`${method}_params`];
       const searchParams = new URLSearchParams();
-      for (const [paramName, paramValue] of Object.entries(requestParams)) {
+      for (const [paramName, paramValue] of Object.entries(parameters)) {
         searchParams.set(paramName, String(paramValue));
       }
       const queryString = searchParams.toString();
@@ -74,7 +72,7 @@ async function buildTools(server: McpServer, specUrl: string) {
 
       try {
         const response = await fetch(url, {
-          method: methodToUse.toUpperCase(),
+          method: method as string,
           headers: API_HEADERS,
         });
 
