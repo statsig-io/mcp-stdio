@@ -61,25 +61,41 @@ async function buildTools(server: McpServer, specUrl: string) {
 
     for (const [method, methodData] of Object.entries(methods)) {
       if (methodData.parameters) {
-        enhancedParameters[`${method}_params`] = z.object(methodData.parameters).optional();
+        enhancedParameters[`${method}_params`] = z
+          .object(methodData.parameters)
+          .optional();
       }
     }
 
     server.tool(toolName, description, enhancedParameters, async (params) => {
-      const { method, ...requestParams } = params;
-      const parameters = requestParams[`${method}_params`];
+      const { method, ...otherParams } = params;
+      const methodToUse = method || methodNames[0];
+      const methodParams = otherParams[`${methodToUse}_params`] || {};
+      const methodConfig = methods[methodToUse];
+      const pathParameters = methodConfig.pathParameters;
+      let interpolatedPath = endpoint;
       const searchParams = new URLSearchParams();
-      for (const [paramName, paramValue] of Object.entries(parameters)) {
-        searchParams.set(paramName, String(paramValue));
+      for (const [paramName, paramValue] of Object.entries(methodParams)) {
+        if (pathParameters?.includes(paramName)) {
+          interpolatedPath = interpolatedPath.replace(
+            `{${paramName}}`,
+            encodeURIComponent(String(paramValue))
+          );
+        } else {
+          if (paramValue != null) {
+            searchParams.set(paramName, String(paramValue));
+          }
+        }
       }
       const queryString = searchParams.toString();
-      const url = `${getUrlBase()}${endpoint}${
+      const url = `${getUrlBase()}${interpolatedPath}${
         queryString ? `?${queryString}` : ""
       }`;
+      console.error(`Sending request to ${url}`);
 
       try {
         const response = await fetch(url, {
-          method: method as string,
+          method: methodToUse,
           headers: API_HEADERS,
         });
 

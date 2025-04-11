@@ -5,7 +5,6 @@ import {
   SchemaObject,
 } from "openapi3-ts/oas30";
 import { ZodTypeAny, z } from "zod";
-
 import { fetchOpenApiSpec } from "./api.js";
 
 export type ApiSchema = Record<
@@ -15,6 +14,7 @@ export type ApiSchema = Record<
     {
       summary?: string;
       parameters: Record<string, z.ZodType>;
+      pathParameters?: string[];
       description?: string;
     }
   >
@@ -29,8 +29,9 @@ export class OpenApiToZod {
     "patch",
     "options",
     "head",
+    "trace",
   ];
-  private INCLUDE_TAG = 'MCP';
+  private INCLUDE_TAG = "MCP";
   private openApiSpec: OpenAPIObject | null = null;
   constructor(private specUrl: string) {
     this.specUrl = specUrl;
@@ -59,6 +60,18 @@ export class OpenApiToZod {
         .map((param) => [param.name, this.openApiParameterToZod(param)])
         .filter(([_, zod]) => zod !== undefined)
     );
+  }
+
+  private extractPathParameters(
+    parameters: (ParameterObject | ReferenceObject)[] | undefined
+  ): string[] {
+    if (!parameters) {
+      return [];
+    }
+
+    return parameters
+      .filter((param) => "in" in param && param.in === "path")
+      .map((param) => (param as ParameterObject).name);
   }
 
   private openApiSchemaToZod(
@@ -152,9 +165,11 @@ export class OpenApiToZod {
         const parameters = this.openApiParameterArrayToZod(
           operation.parameters
         );
+        const pathParameters = this.extractPathParameters(operation.parameters);
         schema[path][method] = {
           summary: operation.summary,
           parameters,
+          pathParameters,
           description: operation.description,
         };
       }
