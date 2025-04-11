@@ -3,8 +3,15 @@ import { OpenApiToZod } from "./testing.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-const STATSIG_OPENAPI_URL = "https://api.statsig.com/openapi/20240601.json";
-const STATSIG_API_URL_BASE = "https://api.statsig.com";
+const DEFAULT_STATSIG_API_URL_BASE = "https://api.statsig.com";
+
+function getUrlBase() {
+  return process.env.STATSIG_HOST || DEFAULT_STATSIG_API_URL_BASE;
+}
+
+function getOpenApiUrl() {
+  return `${getUrlBase()}/openapi/20240601.json`;
+}
 
 const API_HEADERS = {
   "Content-Type": "application/json",
@@ -18,7 +25,7 @@ const server = new McpServer({
 });
 
 async function buildTools(server: McpServer, specUrl: string) {
-  const converter = await new OpenApiToZod(STATSIG_OPENAPI_URL).initialize();
+  const converter = await new OpenApiToZod(specUrl).initialize();
   const schema = converter.specToZod();
   const toolNames = new Set<string>();
 
@@ -66,7 +73,7 @@ async function buildTools(server: McpServer, specUrl: string) {
         searchParams.set(paramName, String(paramValue));
       }
       const queryString = searchParams.toString();
-      const url = `${STATSIG_API_URL_BASE}${endpoint}${
+      const url = `${getUrlBase()}${endpoint}${
         queryString ? `?${queryString}` : ""
       }`;
 
@@ -101,7 +108,9 @@ async function buildTools(server: McpServer, specUrl: string) {
 }
 
 async function main() {
-  await buildTools(server, STATSIG_OPENAPI_URL);
+  const specUrl = getOpenApiUrl();
+  console.error(`Using API spec from ${specUrl}`);
+  await buildTools(server, specUrl);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Statsig MCP Server running on stdio");
