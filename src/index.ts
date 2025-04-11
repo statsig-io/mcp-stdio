@@ -14,21 +14,40 @@ function getOpenApiUrl() {
   return `${getUrlBase()}/openapi/20240601.json`;
 }
 
-const API_HEADERS = {
-  "Content-Type": "application/json",
-  "STATSIG-API-KEY": process.env.STATSIG_API_KEY || "[KEY MISSING]",
-  "STATSIG-API-VERSION": "20240601",
-  "User-Agent": `statsig-mcp-server/1.0.0 (platform=${os.platform()}; node=${process.version.substring(1)})`,
-};
+function getApiKeys(): string[] {
+  const apiKeyEnv = process.env.STATSIG_API_KEY;
+  if (!apiKeyEnv) {
+    return [];
+  }
+  return apiKeyEnv.split(",");
+}
+
+function getApiHeaders(apiKeyIndex: number): Record<string, string> | null {
+  const apiKey = getApiKeys()[apiKeyIndex];
+  if (!apiKey) {
+    return null;
+  }
+
+  return {
+    "Content-Type": "application/json",
+    "STATSIG-API-KEY": apiKey,
+    "STATSIG-API-VERSION": "20240601",
+    "User-Agent": `statsig-mcp-server/1.0.0 (platform=${os.platform()}; node=${process.version.substring(1)})`,
+  };
+}
 
 const server = new McpServer({
   name: "statsig",
   version: "1.0.0",
 });
 
-async function isWarehouseNative(): Promise<boolean | null> {
+async function isWarehouseNative(companyIndex: number): Promise<boolean | null> {
+  const headers = getApiHeaders(companyIndex);
+  if (!headers) {
+    return null;
+  }
   const response = await fetch(`${getUrlBase()}/console/v1/company`, {
-    headers: API_HEADERS,
+    headers,
   });
   if (!response.ok) {
     return null;
@@ -44,6 +63,7 @@ async function buildTools(server: McpServer, specUrl: string, showWarehouseNativ
   const converter = await new OpenApiToZod(specUrl).initialize();
   const schema = converter.specToZod();
   const toolNames = new Set<string>();
+  const apiKeyLength = getApiKeys().length;
 
   for (const [endpoint, methods] of Object.entries(schema)) {
     let toolName = endpoint.replace(/[^a-zA-Z0-9]/g, "-").substring(0, 40);
@@ -91,6 +111,14 @@ async function buildTools(server: McpServer, specUrl: string, showWarehouseNativ
       }
     }
 
+    if (apiKeyLength > 1) {
+      enhancedParameters['project_index'] = z.number().min(0).max(
+        apiKeyLength - 1
+      ).describe(
+        `Index of the project to use.`
+      );
+    }
+
     server.tool(toolName, description, enhancedParameters, async (params) => {
       const { method, ...otherParams } = params;
       const methodToUse = method || methodNames[0];
@@ -117,10 +145,15 @@ async function buildTools(server: McpServer, specUrl: string, showWarehouseNativ
       }`;
       console.error(`Sending request to ${url}`);
 
+      const headers = getApiHeaders(params.project_index ?? 0);
+      if (!headers) {
+        throw new Error("No API key found");
+      }
+
       try {
         const response = await fetch(url, {
           method: methodToUse,
-          headers: API_HEADERS,
+          headers,
         });
 
         if (!response.ok) {
@@ -150,9 +183,12 @@ async function buildTools(server: McpServer, specUrl: string, showWarehouseNativ
 async function main() {
   const specUrl = getOpenApiUrl();
   console.error(`Using API spec from ${specUrl}`);
-  const isWHN = await isWarehouseNative();
+  const areWHN = await Promise.all(
+    getApiKeys().map(async (_, index) => await isWarehouseNative(index)),
+  );
   // If we can't determine if WHN, we want to show WHN
-  await buildTools(server, specUrl, isWHN === false ? false : true);
+  const isAllCloud = areWHN.every((isWHN) => isWHN === false);
+  await buildTools(server, specUrl, !isAllCloud);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Statsig MCP Server running on stdio");
