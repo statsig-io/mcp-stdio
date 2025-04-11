@@ -3,26 +3,23 @@ import {
   ParameterObject,
   ReferenceObject,
   SchemaObject,
-  ComponentsObject,
-  RequestBodyObject,
 } from "openapi3-ts/oas30";
 import { ZodTypeAny, z } from "zod";
 
 import { fetchOpenApiSpec } from "./api.js";
 
-type ZodSchema = ZodTypeAny;
 export type ApiSchema = Record<
   string, // base path
   Record<
     string, // method
     {
       summary?: string;
-      parameters: Record<string, ZodSchema>;
+      parameters: Record<string, z.ZodType>;
       pathParameters?: string[];
+      ending?: string; // only for PUT operations
       description?: string;
       isWHN: boolean;
-      requestBody?: Record<string, ZodSchema>;
-    }
+    }[]
   >
 >;
 
@@ -49,22 +46,10 @@ export class OpenApiToZod {
     return this;
   }
 
-  resolveReference<T>(ref: string, components: ComponentsObject): T {
-    const parts = ref.replace(/^#\/components\//, "").split("/");
-    let result: any = components;
-
-    for (const part of parts) {
-      result = result?.[part];
-      if (!result) throw new Error(`Could not resolve reference: ${ref}`);
-    }
-
-    return result as T;
-  }
-
   private ensureParameterObject(
     parameter: ParameterObject | ReferenceObject
   ): parameter is ParameterObject {
-    return "$ref" in parameter ? false : true;
+    return !("$ref" in parameter);
   }
 
   private openApiParameterArrayToZod(
@@ -93,123 +78,57 @@ export class OpenApiToZod {
       .map((param) => (param as ParameterObject).name);
   }
 
-  convertRequestBodyToZod(
-    requestBody: RequestBodyObject | ReferenceObject | undefined,
-    components: ComponentsObject
-  ): Record<string, ZodSchema> | undefined {
-    if (!requestBody) return undefined;
-
-    const actual =
-      "$ref" in requestBody
-        ? this.resolveReference<RequestBodyObject>(requestBody.$ref, components)
-        : requestBody;
-
-    const content = actual.content ?? {};
-
-    const mediaTypeObject = content["application/json"];
-
-    if (!mediaTypeObject?.schema) return undefined;
-
-    const schema = this.convertSchemaObjectToZod(
-      mediaTypeObject.schema,
-      components
-    );
-
-    const result: Record<string, ZodSchema> = {};
-
-    if (actual.required) {
-      result["application/json"] = schema;
-    } else {
-      result["application/json"] = schema.optional();
-    }
-
-    return result;
-  }
-
-  private convertSchemaObjectToZod(
-    schemaObject: any,
-    components?: ComponentsObject | undefined
-  ): ZodSchema {
+  private openApiSchemaToZod(
+    schemaObject: SchemaObject | ReferenceObject
+  ): z.ZodType {
     if ("$ref" in schemaObject) {
-      const resolved = this.resolveReference(
-        schemaObject.$ref,
-        components ?? {}
-      );
-      return this.convertSchemaObjectToZod(resolved, components);
-    }
-
-    if (schemaObject.enum && schemaObject.enum.length > 0) {
-      const enumValues = schemaObject.enum as [string, ...string[]];
-      return z.enum(enumValues);
-    }
-    if (schemaObject.allOf) {
-      return schemaObject.allOf
-        .map((s: any) => this.convertSchemaObjectToZod(s, components))
-        .reduce((a: ZodSchema, b: ZodSchema) => z.intersection(a, b));
-    }
-
-    if (schemaObject.oneOf) {
-      return z.union(
-        schemaObject.oneOf.map((s: any) =>
-          this.convertSchemaObjectToZod(s, components)
-        )
-      );
-    }
-
-    if (schemaObject.anyOf) {
-      return z.union(
-        schemaObject.anyOf.map((s: any) =>
-          this.convertSchemaObjectToZod(s, components)
-        )
-      );
+      throw new Error("$ref in param schema not supported");
     }
 
     if (schemaObject.type) {
-      let base: ZodSchema;
-
-      switch (schemaObject.type) {
-        case "string":
-          base = z.string();
-          break;
-        case "number":
-        case "integer":
-          base = z.number();
-          break;
-        case "boolean":
-          base = z.boolean();
-          break;
-        case "array":
-          base = z.array(
-            this.convertSchemaObjectToZod(schemaObject.items, components)
-          );
-          break;
-        case "object":
-          const shape: Record<string, ZodSchema> = {};
-          const required = new Set(schemaObject.required ?? []);
-          for (const [key, prop] of Object.entries(
-            schemaObject.properties ?? {}
-          )) {
-            const zodProp = this.convertSchemaObjectToZod(prop, components);
-            shape[key] = required.has(key) ? zodProp : zodProp.optional();
-          }
-          base = z.object(shape);
-          break;
-        default:
-          base = z.any();
+      if (Array.isArray(schemaObject.type)) {
+        throw new Error("Array type not supported");
       }
 
+      let schema: z.ZodType = (() => {
+        switch (schemaObject.type) {
+          case "integer":
+            return z.number();
+          case "number":
+            return z.number();
+          case "string":
+            return z.string();
+          case "boolean":
+            return z.boolean();
+          case "object":
+            throw new Error("object param not supported");
+          case "null":
+            throw new Error("null param not supported");
+          case "array":
+            if (!schemaObject.items) {
+              throw new Error("array type schema does not have items");
+            }
+            return z.array(this.openApiSchemaToZod(schemaObject.items));
+          default:
+            throw new Error(`Unsupported type: ${schemaObject.type}`);
+        }
+      })();
       if (schemaObject.nullable) {
-        base = base.nullable();
+        schema = schema.nullable();
       }
-
-      if (schemaObject.description) {
-        base = base.describe(schemaObject.description);
-      }
-
-      return base;
+      return schema;
+    } else if (schemaObject.oneOf) {
+      // zod prefers to know about the array types at compile time. This makes this work, and we can't infer a typescript type which is fine.
+      return z.union(
+        schemaObject.oneOf.map((schema) => this.openApiSchemaToZod(schema)) as [
+          ZodTypeAny,
+          ZodTypeAny,
+          ...ZodTypeAny[]
+        ]
+      );
+    } else {
+      throw new Error("unsupported schema object");
     }
-
-    return z.any();
   }
 
   private openApiParameterToZod(
@@ -218,7 +137,7 @@ export class OpenApiToZod {
     if (!parameter.schema) {
       return undefined;
     }
-    let schema = this.convertSchemaObjectToZod(parameter.schema);
+    let schema = this.openApiSchemaToZod(parameter.schema);
     if (!parameter.required) {
       schema = schema.optional();
     }
@@ -233,7 +152,6 @@ export class OpenApiToZod {
     if (this.openApiSpec == null) {
       return schema;
     }
-    const components = this.openApiSpec.components ?? {};
 
     for (const [path, pathItem] of Object.entries(this.openApiSpec.paths)) {
       for (const method of this.HTTP_METHODS) {
@@ -245,27 +163,38 @@ export class OpenApiToZod {
         ) {
           continue;
         }
-        if (!(path in schema)) {
-          schema[path] = {};
+
+        // if the method is PUT (i.e. /console/v1/experiments/{id}/start) trim the last part of the url and turn it into a param
+        let ending: string | undefined;
+        let adjustedPath = path;
+        if (method === "put") {
+          const splitUrl = path.split("/");
+          ending = splitUrl.pop();
+          adjustedPath = splitUrl.join("/");
+        }
+
+        if (!(adjustedPath in schema)) {
+          schema[adjustedPath] = {};
+        }
+        if (!(method in schema[adjustedPath])) {
+          schema[adjustedPath][method] = [];
         }
 
         const parameters = this.openApiParameterArrayToZod(
           operation.parameters
         );
         const pathParameters = this.extractPathParameters(operation.parameters);
-        schema[path][method] = {
+
+        schema[adjustedPath][method].push({
           summary: operation.summary,
           parameters,
           pathParameters,
+          ending,
           description: operation.description,
-          isWHN: operation.tags.some((tag) =>
-            tag.includes(this.WHN_TAG_SUBSTR)
-          ),
-          requestBody: this.convertRequestBodyToZod(
-            operation.requestBody,
-            components
-          ),
-        };
+          isWHN:
+            operation.tags &&
+            operation.tags.some((tag) => tag.includes(this.WHN_TAG_SUBSTR)),
+        });
       }
     }
 

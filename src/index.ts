@@ -1,7 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { OpenApiToZod } from "./testing.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import os from "os";
 import { z } from "zod";
 
 const DEFAULT_STATSIG_API_URL_BASE = "https://latest.statsigapi.net";
@@ -18,9 +17,6 @@ const API_HEADERS = {
   "Content-Type": "application/json",
   "STATSIG-API-KEY": process.env.STATSIG_API_KEY || "[KEY MISSING]",
   "STATSIG-API-VERSION": "20240601",
-  "User-Agent": `statsig-mcp-server/1.0.0 (platform=${os.platform()}; node=${process.version.substring(
-    1
-  )})`,
 };
 
 const server = new McpServer({
@@ -58,33 +54,45 @@ async function buildTools(
     }
     toolNames.add(toolName);
 
-    const methodsToUse = Object.fromEntries(
-      Object.entries(methods).filter(
-        ([_, method]) => method.isWHN === showWarehouseNative
-      )
-    );
+    // Fixed filter function with return statement
+    const methodsToUse = Object.entries(methods).filter(([_, methodArray]) => {
+      return methodArray.some((method) => method.isWHN === showWarehouseNative);
+    });
 
-    if (Object.keys(methodsToUse).length === 0) {
+    if (methodsToUse.length === 0) {
       continue;
     }
 
-    const methodsInfo = Object.values(methodsToUse)
-      .map((methodInfo) => {
-        return `${methodInfo.summary?.toUpperCase()}: ${
-          methodInfo.summary
-        } || "No summary available"`;
+    const methodsInfo = methodsToUse
+      .map(([methodName, methodDetails]) => {
+        const subDetailString = methodDetails
+          .map((methodDetailObject) => {
+            if (methodDetailObject.ending) {
+              return `When using parameter ${
+                methodDetailObject.ending
+              } on ${methodName}; (${methodDetailObject.ending}): ${
+                methodDetailObject.summary || "No summary available"
+              }`;
+            } else {
+              return `${methodDetailObject.summary || "No summary available"}`;
+            }
+          })
+          .join("\n");
+        return `${methodName}: ${
+          subDetailString || "No summary available for endpoint"
+        }`;
       })
       .join("\n");
 
     const description =
       `API endpoint: ${endpoint}\n` +
-      `Available methods: ${Object.keys(methodsToUse)
-        .join(", ")
-        .toUpperCase()}\n` +
+      `Available methods: ${methodsToUse
+        .map(([method]) => method.toUpperCase())
+        .join(", ")}\n` +
       `---\n` +
       methodsInfo;
 
-    const methodNames = Object.keys(methodsToUse);
+    const methodNames = methodsToUse.map(([method]) => method);
     let enhancedParameters: Record<string, z.ZodType> = {
       method: z
         .enum(methodNames as [string, ...string[]])
@@ -93,27 +101,81 @@ async function buildTools(
         ),
     };
 
-    for (const [method, methodData] of Object.entries(methodsToUse)) {
-      if (methodData.parameters) {
-        enhancedParameters[`${method}_params`] = z
-          .object({
-            ...methodData.parameters,
-            ...methodData.requestBody,
-          })
-          .optional();
-      }
-    }
+    // Complete the map function to process method parameters
+    methodsToUse.forEach(([methodName, methodDetails]) => {
+      methodDetails.forEach((detail) => {
+        if (Object.keys(detail.parameters).length > 0) {
+          const paramKey = detail.ending
+            ? `${methodName}_${detail.ending}_params`
+            : `${methodName}_params`;
+
+          enhancedParameters[paramKey] = z
+            .object(detail.parameters)
+            .optional()
+            .describe(
+              detail.ending
+                ? `Parameters for ${methodName} with '${detail.ending}' ending`
+                : `Parameters for ${methodName}`
+            );
+        }
+      });
+    });
 
     server.tool(toolName, description, enhancedParameters, async (params) => {
       const { method, ...otherParams } = params;
       const methodToUse = method || methodNames[0];
-      const methodParams = otherParams[`${methodToUse}_params`] || {};
-      const methodConfig = methodsToUse[methodToUse];
-      const pathParameters = methodConfig.pathParameters;
+      const methodArray =
+        methodsToUse.find(([m]) => m === methodToUse)?.[1] || [];
+
+      let operationConfig;
+      let methodParams = {};
+      let endingToUse;
+
+      if (methodArray.length === 1) {
+        operationConfig = methodArray[0];
+        const paramKey = operationConfig.ending
+          ? `${methodToUse}_${operationConfig.ending}_params`
+          : `${methodToUse}_params`;
+        methodParams = otherParams[paramKey] || {};
+        endingToUse = operationConfig.ending;
+      } else {
+        for (const config of methodArray) {
+          if (config.ending) {
+            const paramKey = `${methodToUse}_${config.ending}_params`;
+            if (paramKey in otherParams) {
+              operationConfig = config;
+              methodParams = otherParams[paramKey] || {};
+              endingToUse = config.ending;
+              break;
+            }
+          }
+        }
+
+        if (!operationConfig) {
+          operationConfig = methodArray[0];
+          const paramKey = operationConfig.ending
+            ? `${methodToUse}_${operationConfig.ending}_params`
+            : `${methodToUse}_params`;
+          methodParams = otherParams[paramKey] || {};
+          endingToUse = operationConfig.ending;
+        }
+      }
+
+      if (!operationConfig) {
+        throw new Error(`No configuration found for method ${methodToUse}`);
+      }
+
+      const pathParameters = operationConfig.pathParameters || [];
       let interpolatedPath = endpoint;
+
+      // For PUT with endings, we need to append the ending to the path
+      if (methodToUse === "put" && endingToUse) {
+        interpolatedPath = `${interpolatedPath}/${endingToUse}`;
+      }
+
       const searchParams = new URLSearchParams();
       for (const [paramName, paramValue] of Object.entries(methodParams)) {
-        if (pathParameters?.includes(paramName)) {
+        if (pathParameters.includes(paramName)) {
           interpolatedPath = interpolatedPath.replace(
             `{${paramName}}`,
             encodeURIComponent(String(paramValue))
@@ -124,24 +186,24 @@ async function buildTools(
           }
         }
       }
+
       const queryString = searchParams.toString();
       const url = `${getUrlBase()}${interpolatedPath}${
         queryString ? `?${queryString}` : ""
       }`;
       console.error(`Sending request to ${url}`);
-      const result = methodParams["application/json"];
 
       try {
         const response = await fetch(url, {
           method: methodToUse,
           headers: API_HEADERS,
-          body: result ? JSON.stringify(result) : undefined,
         });
 
         if (!response.ok) {
           const errorText = await response.text();
           throw new Error(`API Error (${response.status}): ${errorText}`);
         }
+
         let responseData;
         const contentType = response.headers.get("content-type");
         if (contentType && contentType.includes("application/json")) {
