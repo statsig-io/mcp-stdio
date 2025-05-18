@@ -46,6 +46,7 @@ async function buildTools(
   const converter = await new OpenApiToZod(specUrl).initialize();
   const schema = converter.specToZod();
   const toolNames = new Set<string>();
+  
 
   for (const [endpoint, methods] of Object.entries(schema)) {
     let toolName = endpoint.replace(/[^a-zA-Z0-9]/g, "-").substring(0, 40);
@@ -63,6 +64,7 @@ async function buildTools(
       continue;
     }
 
+    
     const methodsInfo = methodsToUse
       .map(([methodName, methodDetails]) => {
         const subDetailString = methodDetails
@@ -227,9 +229,8 @@ async function buildTools(
 async function main() {
   const specUrl = getOpenApiUrl();
   console.error(`Using API spec from ${specUrl}`);
-  const isWHN = await isWarehouseNative();
-  // If we can't determine if WHN, we want to show WHN
-  await buildTools(server, specUrl, isWHN === false ? false : true);
+  // For now, lets give everyone false here as the WHN flag isn't consistent
+  await buildTools(server, specUrl, false);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Statsig MCP Server running on stdio");
