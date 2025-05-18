@@ -47,9 +47,6 @@ async function buildTools(
   const schema = converter.specToZod();
   const toolNames = new Set<string>();
   
-  console.error(`Building tools with showWarehouseNative=${showWarehouseNative}`);
-  console.error("Available endpoints in schema:");
-  console.error(Object.keys(schema).join("\n"));
 
   for (const [endpoint, methods] of Object.entries(schema)) {
     let toolName = endpoint.replace(/[^a-zA-Z0-9]/g, "-").substring(0, 40);
@@ -64,11 +61,9 @@ async function buildTools(
     });
 
     if (methodsToUse.length === 0) {
-      console.error(`Skipping endpoint ${endpoint} - no matching methods for WHN=${showWarehouseNative}`);
       continue;
     }
 
-    console.error(`Adding tool: ${toolName} for ${endpoint}`);
     
     const methodsInfo = methodsToUse
       .map(([methodName, methodDetails]) => {
