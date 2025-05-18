@@ -228,8 +228,8 @@ async function main() {
   const specUrl = getOpenApiUrl();
   console.error(`Using API spec from ${specUrl}`);
   const isWHN = await isWarehouseNative();
-  // If we can't determine if WHN, we want to show WHN
-  await buildTools(server, specUrl, isWHN === false ? false : true);
+  // For now, lets give everyone false here as the WHN flag isn't consistent
+  await buildTools(server, specUrl, false);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Statsig MCP Server running on stdio");
