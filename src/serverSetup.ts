@@ -12,15 +12,21 @@ function getOpenApiUrl() {
   return `${getUrlBase()}/openapi/20240601.json`;
 }
 
-const API_HEADERS = {
-  "Content-Type": "application/json",
-  "STATSIG-API-KEY": process.env.STATSIG_API_KEY || "[KEY MISSING]",
-  "STATSIG-API-VERSION": "20240601",
-};
+function getApiHeaders(requestApiKey?: string) {
+  // Use API key from request if provided, otherwise fall back to environment variable
+  const apiKey = requestApiKey || process.env.STATSIG_API_KEY || "[KEY MISSING]";
+  
+  return {
+    "Content-Type": "application/json",
+    "STATSIG-API-KEY": apiKey,
+    "STATSIG-API-VERSION": "20240601",
+  };
+}
 
-async function isWarehouseNative(): Promise<boolean | null> {
+// Modified to accept API key parameter
+async function isWarehouseNative(requestApiKey?: string): Promise<boolean | null> {
   const response = await fetch(`${getUrlBase()}/console/v1/company`, {
-    headers: API_HEADERS,
+    headers: getApiHeaders(requestApiKey),
   });
   if (!response.ok) {
     return null;
@@ -35,7 +41,8 @@ async function isWarehouseNative(): Promise<boolean | null> {
 async function buildTools(
   server: McpServer,
   specUrl: string,
-  showWarehouseNative: boolean
+  showWarehouseNative: boolean,
+  requestApiKey?: string
 ) {
   const converter = await new OpenApiToZod(specUrl).initialize();
   const schema = converter.specToZod();
@@ -185,12 +192,12 @@ async function buildTools(
       const url = `${getUrlBase()}${interpolatedPath}${
         queryString ? `?${queryString}` : ""
       }`;
-      console.error(`Sending request to ${url}`);
+      console.debug(`Sending request to ${url}`);
 
       try {
         const response = await fetch(url, {
           method: methodToUse,
-          headers: API_HEADERS,
+          headers: getApiHeaders(requestApiKey),
         });
 
         if (!response.ok) {
@@ -218,19 +225,18 @@ async function buildTools(
   }
 }
 
-export async function createServer() {
-
+export async function createServer(requestApiKey?: string) {
     const server = new McpServer({
         name: "statsig",
         version: "1.0.0",
     });
 
     const specUrl = getOpenApiUrl();
-    console.error(`Using API spec from ${specUrl}`);
-    
+    console.debug(`Using API spec from ${specUrl}`);
+
     // const isWHN = await isWarehouseNative();
     // For now, lets give everyone false here as the WHN flag isn't consistent
-    await buildTools(server, specUrl, false);
+    await buildTools(server, specUrl, false, requestApiKey);
 
     return server;
 }
